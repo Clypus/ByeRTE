@@ -1,0 +1,3 @@
+#!/bin/sh
+# ByeRTE CLI sarmalayıcı
+exec env PYTHONPATH=/usr/lib/byerte /usr/bin/python3 -m byerte "$@"

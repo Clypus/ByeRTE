@@ -1,0 +1,12 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=ByeRTE
+GenericName=DPI Engel Aşıcı
+Comment=Discord ve Roblox erişim engelini aşar (kapatınca sistem normale döner)
+Exec=byerte-gui
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=discord;roblox;dpi;zapret;engel;vpn;
+StartupNotify=true

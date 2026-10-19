@@ -1,0 +1,23 @@
+ByeRTE
+Copyright (C) 2026 ByeRTE contributors
+Licensed under the GNU General Public License v3.0 or later (see LICENSE).
+
+This product bundles third-party components:
+
+1. zapret2 (nfqws2 engine + Lua strategy scripts)
+   - Version: v1.0.5.2 (see data/ZAPRET2_VERSION)
+   - Copyright (C) bol-van and contributors
+   - License: GPL-3.0-or-later
+   - Source: https://github.com/bol-van/zapret2
+   - The binaries under data/nfqws2/ are the UNMODIFIED official release
+     binaries from the upstream project's v1.0.5.2 release. Their SHA-256
+     checksums are recorded in data/SHA256SUMS and match the upstream
+     sha256sum.txt. The corresponding source code is available at the URL
+     above. The Lua scripts under data/lua/ are unmodified upstream files.
+
+Turkish ISP DPI-bypass strategy presets were adapted from:
+   - Unwall            — https://github.com/WinTone01/Unwall
+   - splitwire-turkey  — https://github.com/cagritaskn/splitwire-turkey
+
+ByeRTE is an anti-censorship / network-access tool intended for lawful,
+educational use on networks you are authorized to use.

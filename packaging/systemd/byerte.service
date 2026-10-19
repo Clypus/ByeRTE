@@ -1,0 +1,27 @@
+[Unit]
+Description=ByeRTE — Discord/Roblox DPI engel aşıcı
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONPATH=/usr/lib/byerte PYTHONUNBUFFERED=1
+# Motor: nftables tablosunu kurar, DoH köprüsünü ve nfqws2'yi yönetir.
+# Strateji/arayüz /etc/byerte/byerte.conf'tan okunur.
+ExecStart=/usr/bin/python3 -m byerte.engine
+
+# GÜVENLİK (en önemli satır): süreç NASIL biterse bitsin (normal çıkış, çökme,
+# kill -9) nftables tablosunu sil. Köprü ölünce DNS redirect'in ölü porta asılı
+# kalmasını engeller — kapatınca/çökünce sistem HER HÂLÜKÂRDA eski haline döner.
+ExecStopPost=-/usr/sbin/nft delete table inet byerte
+
+# nfqws2 çökerse servisi yeniden kur. Bu arada fail-open tablo interneti kesmez;
+# yeniden başlatma DNS'i de toparlar.
+Restart=on-failure
+RestartSec=2
+
+RuntimeDirectory=byerte
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

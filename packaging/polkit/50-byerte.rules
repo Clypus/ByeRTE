@@ -1,0 +1,13 @@
+// ByeRTE — GUI'nin `pkexec /usr/bin/byerte ...` çalıştırmasına izin ver.
+// Yerel, aktif ve wheel/sudo grubundaki kullanıcıdan bir kez yönetici parolası
+// istenir ve oturum boyunca önbelleğe alınır (AUTH_ADMIN_KEEP).
+//
+// Parolasız istiyorsanız polkit.Result.YES yapın (önerilmez).
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        action.lookup("program") == "/usr/bin/byerte" &&
+        subject.active && subject.local &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+});
