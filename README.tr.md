@@ -1,5 +1,7 @@
 # ByeRTE
 
+*ByeRTE = **Bye** **R**estrictions, **T**hrottling & **E**avesdropping — engellemeye, hız kısmaya ve (DPI tabanlı) dinlemeye elveda.*
+
 **Linux ve Windows için GoodbyeDPI tarzı DPI engel aşıcı — Discord ve Roblox (Türkiye).**
 
 Türkiye'de Discord ve Roblox hem DNS zehirleme hem SNI tabanlı DPI ile engelli.

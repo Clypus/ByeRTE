@@ -5,4 +5,4 @@ Linux: tek bir nftables tablosu, fail-open queue kuralları, motor zapret2 nfqws
 Windows: WinDivert (süreç ölünce yakalama biter), motor zapret2 winws2.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

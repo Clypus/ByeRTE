@@ -1,5 +1,7 @@
 # ByeRTE
 
+*ByeRTE = **Bye** **R**estrictions, **T**hrottling & **E**avesdropping.*
+
 **A GoodbyeDPI-style DPI bypass for Linux & Windows — unblocks Discord & Roblox in Turkey.**
 **Linux ve Windows için GoodbyeDPI tarzı DPI engel aşıcı — Discord & Roblox (Türkiye).**
 

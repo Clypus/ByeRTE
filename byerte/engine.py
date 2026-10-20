@@ -14,6 +14,7 @@ root olarak çalışır (nft + NFQUEUE için). nfqws2 kendi --user=nobody ile ye
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -21,13 +22,16 @@ import sys
 import threading
 import time
 
-from . import config, paths, strategies
+from . import config, paths, strategies, vpn
 from .dns import DnsBridge
 
 try:
     import pwd
 except ImportError:  # Windows: bu modül yalnızca Linux'ta çalışır (bkz. byerte.win.engine)
     pwd = None  # type: ignore[assignment]
+
+log = logging.getLogger("byerte.engine")
+VPN_POLL = 3.0  # saniye: VPN durumunu bu aralıkla yokla (varsa yakalamayı duraklat)
 
 
 # --- Çekirdek modülleri ------------------------------------------------------
@@ -151,12 +155,54 @@ class Engine:
         self.proc: subprocess.Popen | None = None
         self.bridge: DnsBridge | None = None
         self._stop = threading.Event()
+        self._started = 0
+        self._vpn_flag = False                  # VPN monitör thread'i günceller
+        self._vpn_thread: threading.Thread | None = None
 
     def _start_nfqws(self) -> None:
         argv = strategies.build_argv(self.strategy, with_exclude=paths.denylist_active(),
                                      all_sites=paths.all_sites_active())
         self.proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
+
+    # --- VPN duraklatma: yakalamayı tekrar tekrar aç/kapat (köprü hep ayakta) ---
+
+    def _start_capture(self) -> None:
+        """nft tablosu + nfqws2'yi (yeniden) kur."""
+        nft_apply(self.wan_iface)
+        self._start_nfqws()
+
+    def _stop_capture(self) -> None:
+        """Yakalamayı durdur: nft tablosunu sil + nfqws2'yi öldür → DNS/trafik normale."""
+        nft_delete()
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+    def _write_running_state(self, paused: bool) -> None:
+        config.write_state({
+            "running": True,
+            "pid": os.getpid(),
+            "strategy": self.strategy,
+            "wan_iface": self.wan_iface,
+            "started": self._started,
+            "paused_for_vpn": paused,
+        })
+
+    def _vpn_monitor(self) -> None:
+        """Arka planda VPN durumunu yoklar (algılama yavaş olabilir; ana döngüyü
+        bloke etmesin diye ayrı thread). Bayrağı okuyan run() geçişleri yapar."""
+        while not self._stop.is_set():
+            if self._stop.wait(VPN_POLL):
+                break
+            try:
+                self._vpn_flag = vpn.vpn_active()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _teardown(self) -> None:
         # Sıra önemli: önce nft (yeni akışları durdur), sonra nfqws, sonra köprü
@@ -183,21 +229,36 @@ class Engine:
         signal.signal(signal.SIGINT, _sig)
 
         try:
+            self._started = int(time.time())
             self.bridge = DnsBridge()
             self.bridge.start()
-            nft_apply(self.wan_iface)
-            self._start_nfqws()
-            config.write_state({
-                "running": True,
-                "pid": os.getpid(),
-                "strategy": self.strategy,
-                "wan_iface": self.wan_iface,
-                "started": int(time.time()),
-            })
-            # Bekle: durdurma sinyali ya da nfqws2'nin beklenmedik ölümü
+            # VPN açıksa yakalamayı HİÇ başlatma (çalışan VPN zaten DPI'yı aşar;
+            # devrede olursak VPN'in DNS'ini kaçırıp tüneli bozarız).
+            self._vpn_flag = vpn.vpn_active()       # başlangıç durumu (Linux: hızlı)
+            paused = self._vpn_flag
+            if paused:
+                log.info("VPN algılandı; ByeRTE duraklatıldı (yakalama kapalı)")
+            else:
+                self._start_capture()
+            self._write_running_state(paused)
+            self._vpn_thread = threading.Thread(target=self._vpn_monitor,
+                                                 name="byerte-vpnmon", daemon=True)
+            self._vpn_thread.start()
+
             while not self._stop.is_set():
-                if self.proc and self.proc.poll() is not None:
-                    # nfqws2 çöktü → çık (teardown finally'de). systemd yeniden başlatır.
+                active = self._vpn_flag             # monitör thread'inin yayımladığı bayrak
+                if active and not paused:
+                    log.info("VPN algılandı; ByeRTE duraklatılıyor")
+                    self._stop_capture()
+                    paused = True
+                    self._write_running_state(True)
+                elif not active and paused:
+                    log.info("VPN kapandı; ByeRTE sürdürülüyor")
+                    self._start_capture()
+                    paused = False
+                    self._write_running_state(False)
+                # nfqws2 çöktü → çık (yalnızca etkinken anlamlı). systemd yeniden başlatır.
+                if not paused and self.proc and self.proc.poll() is not None:
                     return 1
                 time.sleep(0.5)
             return 0

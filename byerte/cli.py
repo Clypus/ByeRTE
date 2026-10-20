@@ -136,8 +136,12 @@ def cmd_durum(args) -> int:
     bridge = _bridge_resolves()
     svc = plat.service_active()
     active = bridge or svc
+    paused = bool(st.get("paused_for_vpn"))
     print(_b("ByeRTE durumu"))
-    print(f"  durum      : {_g('AÇIK') if active else _r('KAPALI')}")
+    if paused and active:
+        print(f"  durum      : {_y('DURAKLATILDI')}  (VPN algılandı — VPN'iniz zaten koruyor)")
+    else:
+        print(f"  durum      : {_g('AÇIK') if active else _r('KAPALI')}")
     if plat.service_installed():
         print(f"  {'servis':<11}: {_g('çalışıyor') if svc else 'durdu'}")
     for label, value, good in plat.status_rows():

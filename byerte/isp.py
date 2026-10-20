@@ -23,16 +23,22 @@ _TRACE_PATH = "/cdn-cgi/trace"
 
 def detect_wan_iface() -> str | None:
     """Varsayılan rota arayüzü (ör. wlan0, enp3s0). Windows'ta gerekmez: winws2
-    WinDivert filtresi zaten tüm arayüzleri (loopback/LAN hariç) kapsar."""
+    WinDivert filtresi zaten tüm arayüzleri (loopback/LAN hariç) kapsar.
+
+    VPN tünelleri (tun/wg/ppp/proton...) ATLANIR: desync fiziksel NIC'e bağlanmalı.
+    (VPN varken motor zaten tamamen duraklar; bkz. byerte.vpn.)"""
     if paths.IS_WINDOWS:
         return None
+    from . import vpn
     try:
         out = subprocess.run(["ip", "route", "show", "default"],
                              capture_output=True, text=True, timeout=5).stdout
         for line in out.splitlines():
             parts = line.split()
             if "dev" in parts:
-                return parts[parts.index("dev") + 1]
+                dev = parts[parts.index("dev") + 1]
+                if not vpn.is_tunnel_iface(dev):
+                    return dev
     except Exception:  # noqa: BLE001
         pass
     return None

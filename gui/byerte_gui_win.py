@@ -22,7 +22,7 @@ from tkinter import ttk
 # byerte paketini bul (donmuş / kurulu / repo)
 if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from byerte import paths  # noqa: E402
+from byerte import config, paths  # noqa: E402
 from byerte.dns import answer_count, make_query  # noqa: E402
 from byerte.win import winutil  # noqa: E402
 
@@ -94,7 +94,7 @@ class ByeRTEApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self._busy = False
-        root.title("ByeRTE")
+        root.title("ByeRTE — Bye Restrictions, Throttling & Eavesdropping")
         root.geometry("460x600")
         root.minsize(420, 560)
 
@@ -185,11 +185,20 @@ class ByeRTEApp:
             d = tls_ok("discord.com")
             r = tls_ok("www.roblox.com")
             auto = autostart_enabled()
-            self.root.after(0, lambda: self._apply_status(up, d, r, auto))
+            try:
+                paused = bool(config.read_state().get("paused_for_vpn"))
+            except Exception:  # noqa: BLE001
+                paused = False
+            self.root.after(0, lambda: self._apply_status(up, d, r, auto, paused))
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_status(self, up, d, r, auto):
-        if up:
+    def _apply_status(self, up, d, r, auto, paused=False):
+        if paused and up:
+            self.icon.configure(foreground=IDLE_COLOR)
+            self.title_lbl.configure(text="Duraklatıldı")
+            self.sub_lbl.configure(text="VPN algılandı — VPN'iniz zaten koruyor")
+            self.toggle.configure(text="Kapat")
+        elif up:
             self.icon.configure(foreground=OK_COLOR)
             self.title_lbl.configure(text="Açık")
             self.sub_lbl.configure(text="Discord ve Roblox engeli aşılıyor")
@@ -226,7 +235,7 @@ class ByeRTEApp:
     def _on_toggle(self):
         if self._busy:
             return
-        if self.title_lbl.cget("text") == "Açık":
+        if self.title_lbl.cget("text") in ("Açık", "Duraklatıldı"):
             self._run(["kapat"], "Kapatılıyor…")
         else:
             self._run(["aç", "--operator", self._selected_operator()], "Açılıyor…")

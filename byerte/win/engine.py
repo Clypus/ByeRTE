@@ -23,11 +23,12 @@ import sys
 import threading
 import time
 
-from .. import config, paths, strategies
+from .. import config, paths, strategies, vpn
 from ..dns import DnsBridge, DohResolver
 from . import winutil
 
 log = logging.getLogger("byerte.engine")
+VPN_POLL = 3.0  # saniye: VPN durumunu bu aralıkla yokla (varsa yakalamayı duraklat)
 
 
 # --- Çalışma anı hazırlığı ---------------------------------------------------
@@ -93,6 +94,10 @@ class WinEngine:
         self.proc: subprocess.Popen | None = None
         self.bridge: DnsBridge | None = None
         self.divert = None  # byerte.win.dnsdivert.DnsDivert (tembel import)
+        self._resolver: DohResolver | None = None
+        self._started = 0
+        self._vpn_flag = False                  # VPN monitör thread'i günceller
+        self._vpn_thread: threading.Thread | None = None
         self._stop = stop_event or threading.Event()
 
     def stop(self) -> None:
@@ -108,6 +113,58 @@ class WinEngine:
                 creationflags=winutil.CREATE_NO_WINDOW,
                 cwd=str(paths.winws2_dir()),  # cygwin1.dll ve WinDivert.dll yanında
             )
+
+    # --- VPN duraklatma: yakalamayı tekrar tekrar aç/kapat (köprü hep ayakta) ---
+
+    def _start_capture(self) -> None:
+        """DNS yönlendirmesi (:53) + winws2'yi (yeniden) kur; cache'i temizle."""
+        from .dnsdivert import DnsDivert  # tembel: WinDivert yalnızca gerekince yüklensin
+        self.divert = DnsDivert(self._resolver)
+        self.divert.start()
+        self._start_winws()
+        flush_dns()  # bypass öncesi cache'lenmiş zehirli kayıtları at → temiz çözüm
+
+    def _stop_capture(self) -> None:
+        """Yakalamayı durdur: winws2 + :53 yönlendirmesi → DNS/trafik normale (VPN serbest)."""
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                try:
+                    winutil.taskkill(self.proc.pid)
+                except Exception:  # noqa: BLE001
+                    pass
+        self.proc = None
+        if self.divert is not None:
+            try:
+                self.divert.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.divert = None
+        flush_dns()  # duraklatınca eski (DoH'tan gelen) kayıtlar kalmasın
+
+    def _write_running_state(self, paused: bool) -> None:
+        config.write_state({
+            "running": True,
+            "pid": os.getpid(),
+            "engine_pid": self.proc.pid if self.proc else None,
+            "strategy": self.strategy,
+            "platform": "windows",
+            "started": self._started,
+            "paused_for_vpn": paused,
+        })
+
+    def _vpn_monitor(self) -> None:
+        """Arka planda VPN durumunu yoklar. Algılama (PowerShell) ~2 sn sürebilir;
+        ana döngüyü bloke etmesin diye ayrı thread. run() bu bayrağı okur."""
+        while not self._stop.is_set():
+            if self._stop.wait(VPN_POLL):
+                break
+            try:
+                self._vpn_flag = vpn.vpn_active()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _teardown(self) -> None:
         # Sıra: önce winws2 (DPI bypass'ı durdur), sonra divert (DNS normale), sonra köprü.
@@ -134,8 +191,6 @@ class WinEngine:
 
     def run(self) -> int:
         """Her şeyi kur, bloke ol, çıkışta GARANTİ teardown. Dönüş = çıkış kodu."""
-        from .dnsdivert import DnsDivert  # tembel: WinDivert yalnızca motorda yüklensin
-
         prepare_runtime()
 
         def _sig(_signum, _frame):
@@ -149,32 +204,50 @@ class WinEngine:
                     pass
 
         try:
-            resolver = DohResolver()
+            self._started = int(time.time())
+            self._resolver = DohResolver()
             self.bridge = DnsBridge()           # 127.0.0.1:15353 — yalnızca sağlık kontrolü
-            self.bridge.resolver = resolver     # aynı resolver'ı paylaş
+            self.bridge.resolver = self._resolver
             self.bridge.start()
-            self.divert = DnsDivert(resolver)   # :53 WinDivert yönlendirmesi (asıl iş)
-            self.divert.start()
-            self._start_winws()
-            flush_dns()  # bypass öncesi cache'lenmiş zehirli kayıtları at → temiz çözüm
-            config.write_state({
-                "running": True,
-                "pid": os.getpid(),
-                "engine_pid": self.proc.pid if self.proc else None,
-                "strategy": self.strategy,
-                "platform": "windows",
-                "started": int(time.time()),
-            })
+            # VPN açıksa yakalamayı başlatma: çalışan VPN zaten DPI'yı aşar; devrede
+            # olursak VPN'in DNS'ini kaçırırız ve kill-switch DoH'u engelleyince her
+            # şey tıkanır. VPN kapanınca monitör aşağıda yakalamayı başlatır.
+            self._vpn_flag = vpn.vpn_active()       # başlangıç durumu (bir kerelik, ~2 sn)
+            paused = self._vpn_flag
+            if paused:
+                log.info("VPN algılandı; ByeRTE duraklatıldı (yakalama kapalı)")
+            else:
+                self._start_capture()
+            self._write_running_state(paused)
+            self._vpn_thread = threading.Thread(target=self._vpn_monitor,
+                                                 name="byerte-vpnmon", daemon=True)
+            self._vpn_thread.start()
+
             # İkinci temizlik: yönlendirme açılmadan HEMEN önce ISS'ye giden bir sorgunun
             # (zehirli) cevabı, ilk flush'tan SONRA gelip önbelleğe yazılabilir (TT'de TTL
             # ~1 saat → ör. Discord güncelleme ekranında takılır). Birkaç sn sonra bir kez
             # daha temizleyerek bu yarış penceresini kapatırız.
-            reflush_at = time.monotonic() + 5.0
+            reflush_at = 0.0 if paused else time.monotonic() + 5.0
             while not self._stop.is_set():
-                if self.proc and self.proc.poll() is not None:
+                now = time.monotonic()
+                active = self._vpn_flag             # monitör thread'inin yayımladığı bayrak
+                if active and not paused:
+                    log.info("VPN algılandı; ByeRTE duraklatılıyor")
+                    self._stop_capture()
+                    paused = True
+                    reflush_at = 0.0
+                    self._write_running_state(True)
+                elif not active and paused:
+                    log.info("VPN kapandı; ByeRTE sürdürülüyor")
+                    self._start_capture()
+                    paused = False
+                    reflush_at = now + 5.0
+                    self._write_running_state(False)
+                # winws2 çöktü → çık (yalnızca etkinken anlamlı). Servis yeniden başlatır.
+                if not paused and self.proc and self.proc.poll() is not None:
                     log.error("winws2 beklenmedik şekilde çıktı (kod %s)", self.proc.returncode)
-                    return 1  # servis yeniden başlatır
-                if reflush_at and time.monotonic() >= reflush_at:
+                    return 1
+                if reflush_at and now >= reflush_at:
                     flush_dns()
                     reflush_at = 0.0
                 time.sleep(0.5)
