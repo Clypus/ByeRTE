@@ -112,40 +112,64 @@ def resolve_strategy(name: str) -> str:
     return DEFAULT_STRATEGY
 
 
-def build_argv(strategy_name: str, *, with_quic: bool = True,
-               autohostlist: bool = True) -> list[str]:
-    """Bir strateji için tam nfqws2 argüman listesini üret.
-
-    Her profil kendi filtrelerini taşır (zapret2'de filtreler profil-özeldir);
-    profiller --new ile AYRILIR. Hiçbir profile uymayan paketler örtük boş
-    profil 0'a düşer ve dokunulmadan geçer.
-    """
-    s = STRATEGIES[strategy_name]
-    # Çalışma anı kopyası (/run/byerte): nfqws2 nobody'ye düşünce de okuyabilsin.
-    hostlist = str(paths.active_hostlist_file())
-    auto = str(paths.autohostlist_file())
-
-    argv: list[str] = [
+def _engine_header(s: dict, with_quic: bool) -> list[str]:
+    """Motorun platforma özel başı. Profiller (aşağıda) iki platformda aynıdır."""
+    if paths.IS_WINDOWS:
+        # winws2: nftables yok; yakalamayı kendi WinDivert filtresi yapar. Giden
+        # TCP 80/443 + gelen SYN/FIN/RST (filtre kurucusu ekler). UDP 443 yalnızca
+        # QUIC profili varsa yakalanır. --user yok: winws2 başlatıldıktan sonra
+        # kendini Low integrity + job sandbox'a alır.
+        argv = [str(paths.winws2_bin()), f"--wf-tcp-out={paths.PORTS_TCP}"]
+        if with_quic and s.get("quic"):
+            argv.append(f"--wf-udp-out={paths.PORTS_UDP}")
+        return argv
+    return [
         str(paths.nfqws2_bin()),
         f"--qnum={paths.QUEUE_NUM}",
         f"--fwmark=0x{paths.FWMARK:08X}",
         f"--user={paths.DROP_USER}",
     ]
+
+
+def build_argv(strategy_name: str, *, with_quic: bool = True,
+               autohostlist: bool = True, with_exclude: bool = False,
+               all_sites: bool = False) -> list[str]:
+    """Bir strateji için tam nfqws2 / winws2 argüman listesini üret.
+
+    Her profil kendi filtrelerini taşır (zapret2'de filtreler profil-özeldir);
+    profiller --new ile AYRILIR. Hiçbir profile uymayan paketler örtük boş
+    profil 0'a düşer ve dokunulmadan geçer.
+
+    with_exclude=True ise her profile --hostlist-exclude=<denylist> eklenir
+    (denylist'teki alanlara DPI uygulanmaz). Varsayılan False: denylist boşken
+    argv birebir eskisi gibi kalır.
+
+    all_sites=True ise --hostlist (ve --hostlist-auto) EKLENMEZ → desync TÜM
+    TLS/QUIC akışlarına uygulanır (denylist yine hariç tutar). CPU'yu artırır ve
+    engelsiz bazı siteleri bozabilir; bilinçli bir seçenektir.
+    """
+    s = STRATEGIES[strategy_name]
+    # Çalışma anı kopyası (/run/byerte): nfqws2 nobody'ye düşünce de okuyabilsin.
+    hostlist = paths.arg_path(paths.active_hostlist_file())
+    auto = paths.arg_path(paths.autohostlist_file())
+    exclude = paths.arg_path(paths.active_denylist_file()) if with_exclude else None
+
+    argv: list[str] = _engine_header(s, with_quic)
     argv += paths.lua_init_args()
 
     # --- TLS profili (TCP/443) — İLK profil, başında --new YOK ---
     # zapret2'de --new profiller arası AYIRICIDIR. Başa konursa filtresiz boş bir
     # profil 1 oluşur; ilk eşleşen profil kazandığı için bu boş profil her paketi
     # alır ve hiçbir şey yapmadan geçirir (strateji hiç uygulanmaz).
-    argv += [
-        "--name=tls",
-        "--filter-tcp=443",
-        f"--hostlist={hostlist}",
-        "--payload=tls_client_hello",
-    ]
+    argv += ["--name=tls", "--filter-tcp=443"]
+    if not all_sites:
+        argv.append(f"--hostlist={hostlist}")
+    if exclude:
+        argv.append(f"--hostlist-exclude={exclude}")
+    argv.append("--payload=tls_client_hello")
     for fn in _as_list(s["tls"]):
         argv.append(f"--lua-desync={fn}")
-    if autohostlist:
+    if autohostlist and not all_sites:   # tüm siteler modunda auto-hostlist anlamsız
         argv += [
             f"--hostlist-auto={auto}",
             "--hostlist-auto-fail-threshold=2",
@@ -153,12 +177,12 @@ def build_argv(strategy_name: str, *, with_quic: bool = True,
 
     # --- QUIC profili (UDP/443), opsiyonel ---
     if with_quic and s.get("quic"):
-        argv += [
-            "--new", "--name=quic",
-            "--filter-udp=443",
-            f"--hostlist={hostlist}",
-            "--payload=quic_initial",
-        ]
+        argv += ["--new", "--name=quic", "--filter-udp=443"]
+        if not all_sites:
+            argv.append(f"--hostlist={hostlist}")
+        if exclude:
+            argv.append(f"--hostlist-exclude={exclude}")
+        argv.append("--payload=quic_initial")
         for fn in _as_list(s["quic"]):
             argv.append(f"--lua-desync={fn}")
 
@@ -166,7 +190,10 @@ def build_argv(strategy_name: str, *, with_quic: bool = True,
 
 
 def dry_run(strategy_name: str, **kw) -> tuple[bool, str]:
-    """Stratejiyi nfqws2 --dry-run ile doğrula. (başarılı?, çıktı)."""
+    """Stratejiyi nfqws2/winws2 --dry-run ile doğrula. (başarılı?, çıktı).
+
+    Windows'ta winws2.exe manifest'i yönetici ister: --dry-run bile yetkisiz
+    çalışmaz (WinError 740 → False döner)."""
     import subprocess
 
     # Doğrulama strateji sözdizimi içindir; autohostlist nobody'ye ait olduğundan
@@ -178,8 +205,9 @@ def dry_run(strategy_name: str, **kw) -> tuple[bool, str]:
     # çıkar — yoksa root olmadan initgroups başarısız olur.
     argv = [a for a in argv if not a.startswith("--user=")]
     argv = [argv[0], "--dry-run"] + argv[1:]
+    extra = {"creationflags": subprocess.CREATE_NO_WINDOW} if paths.IS_WINDOWS else {}
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=15, **extra)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
     except Exception as e:  # noqa: BLE001
         return False, str(e)

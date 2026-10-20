@@ -7,6 +7,9 @@ DNS döngüsü olmaz.
 Not: bu köprü root GEREKTİRMEZ; yüksek portta (5355) dinler. nftables 53'ü buraya
 yönlendirir. Köprü düşerse yalnızca DNS bozulur — servis bir bütün olduğundan
 systemd süreci durdurur ve ExecStopPost nftables tablosunu siler.
+
+Windows'ta köprü 15353'te yalnızca sağlık kontrolü için dinler; 53 trafiğini
+byerte.win.dnsdivert WinDivert ile yakalayıp aynı DohResolver'a sorar.
 """
 
 from __future__ import annotations
@@ -57,6 +60,42 @@ def _skip_name(resp: bytes, off: int) -> int:
             return off + 2
         off += 1 + length
     return off
+
+
+def qname_of(msg: bytes) -> str | None:
+    """DNS mesajının ilk sorusundaki alan adını noktalı küçük-harf dizeye çöz
+    (ör. b'...\\x03www\\x06roblox\\x03com\\x00...' → 'www.roblox.com'). Ayrıştıramazsa None.
+    Sıkıştırma işaretçisi soru adında olmaz; basit okuma yeterli."""
+    try:
+        labels = []
+        off = 12
+        n = len(msg)
+        while off < n:
+            length = msg[off]
+            if length == 0:
+                break
+            if length & 0xC0:          # soru adında işaretçi/uzun etiket beklenmez
+                return None
+            off += 1
+            if off + length > n:
+                return None
+            labels.append(msg[off:off + length].decode("latin1").lower())
+            off += length
+        return ".".join(labels) if labels else None
+    except (IndexError, ValueError):
+        return None
+
+
+def domain_suffix_match(qname: str, entries) -> bool:
+    """qname, entries'teki bir alanla aynı mı ya da onun alt alan adı mı?
+    (roblox.com, 'apis.roblox.com' → True). entries küçük harf olmalı."""
+    if not qname:
+        return False
+    qname = qname.rstrip(".").lower()
+    for e in entries:
+        if qname == e or qname.endswith("." + e):
+            return True
+    return False
 
 
 def parse_txt(resp: bytes) -> list[str]:
@@ -113,8 +152,11 @@ class DohResolver:
         finally:
             conn.close()
 
-    def resolve(self, wire: bytes) -> bytes | None:
-        """Ham DNS sorgusunu çöz. Başarısız olursa None."""
+    def resolve(self, wire: bytes, deadline: float | None = None) -> bytes | None:
+        """Ham DNS sorgusunu çöz. Başarısız olursa None.
+
+        deadline: time.monotonic() cinsinden son an; geçildiyse yeni deneme
+        başlatılmaz (Windows'ta tutulan sorgu zamanında ISS'ye bırakılabilsin)."""
         with self._lock:
             start = self._good
         n = len(self._upstreams)
@@ -122,6 +164,10 @@ class DohResolver:
             idx = (start + off) % n
             up = self._upstreams[idx]
             for ip in up["ips"]:
+                if deadline is not None and time.monotonic() >= deadline:
+                    with self._lock:
+                        self.errors += 1
+                    return None
                 try:
                     data = self._try_one(up, ip, wire)
                     with self._lock:
@@ -159,9 +205,19 @@ class _UDPHandler(socketserver.BaseRequestHandler):
                 pass
 
 
-class _ThreadingUDPServer(socketserver.ThreadingUDPServer):
+class _ExclusiveBindMixin:
+    """Windows'ta SO_REUSEADDR başka bir soketin aynı portu ele geçirmesine izin
+    verir; orada portu SO_EXCLUSIVEADDRUSE ile tek başımıza tutarız."""
+
+    def server_bind(self):
+        if paths.IS_WINDOWS and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class _ThreadingUDPServer(_ExclusiveBindMixin, socketserver.ThreadingUDPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = not paths.IS_WINDOWS
     max_packet_size = 4096
 
 
@@ -198,9 +254,9 @@ class _TCPHandler(socketserver.BaseRequestHandler):
         return buf
 
 
-class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
+class _ThreadingTCPServer(_ExclusiveBindMixin, socketserver.ThreadingTCPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = not paths.IS_WINDOWS
 
 
 class DnsBridge:
