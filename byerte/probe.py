@@ -1,22 +1,45 @@
 """Strateji tarama: hangi DPI atlatma stratejisi bu hatta çalışıyor?
 
-nftables tablosu + DoH köprüsü bir kez açılır; her strateji için yalnızca nfqws2
+Yakalama (Linux: nftables tablosu, Windows: WinDivert DNS yönlendirmesi) + DoH
+köprüsü bir kez açılır; her strateji için yalnızca motor (nfqws2/winws2)
 değiştirilerek discord/roblox'a gerçek TLS el sıkışması denenir. En çok başarı +
 en düşük gecikme kazanır. Tarama bittiğinde her şey tam olarak geri alınır.
+
+Platforma özel kurulum/temizlik byerte.platforms.*.ProbeEnv içindedir.
 """
 
 from __future__ import annotations
 
 import socket
 import ssl
-import subprocess
 import time
 
-from . import engine, paths, strategies
-from .dns import DnsBridge
+from . import paths, strategies
+from .platforms import current as _platform
 
 PROBE_TARGETS = ["discord.com", "www.roblox.com", "gateway.discord.gg"]
 TRIES_PER_TARGET = 2
+MAX_CUSTOM_TARGETS = 3  # hostlist'e eklenen özel sitelerden kaç tanesi taranır
+
+# Varsayılan/gömülü hostlist alanları (bunlar zaten PROBE_TARGETS'ta temsil ediliyor;
+# özel hedef seçerken elenir). Ayrıca ALL=1 gibi belirteçler de elenir.
+_BUILTIN = {"discord.com", "discord.gg", "discord.media", "discord.store", "discord.net",
+            "discordapp.com", "discordapp.net", "discord.dev", "discordstatus.com",
+            "roblox.com", "rbxcdn.com", "rbxinfra.net", "rbxtrk.com", "roblox.cn.com"}
+
+
+def _probe_targets() -> list[str]:
+    """Tarama hedefleri: sabit discord/roblox + kullanıcının hostlist'e eklediği
+    özel siteler (ör. pornhub.com). Böylece tara, eklenen siteyi açan stratejiyi de
+    arar. ALL=1 belirteci ve gömülü alanlar elenir."""
+    targets = list(PROBE_TARGETS)
+    for d in paths.load_list(paths.active_hostlist_file()):
+        if d in paths.ALL_SITES_TOKENS or d in _BUILTIN or d in targets:
+            continue
+        targets.append(d)
+        if len(targets) >= len(PROBE_TARGETS) + MAX_CUSTOM_TARGETS:
+            break
+    return targets
 
 
 def _tls_handshake(domain: str, timeout: float = 6.0) -> float | None:
@@ -33,11 +56,11 @@ def _tls_handshake(domain: str, timeout: float = 6.0) -> float | None:
     return None
 
 
-def _score_current() -> tuple[int, float]:
-    """Aktif nfqws2 ile başarı sayısı ve toplam gecikme."""
+def _score_current(targets: list[str]) -> tuple[int, float]:
+    """Aktif motor ile başarı sayısı ve toplam gecikme (verilen hedefler üzerinden)."""
     ok = 0
     total_latency = 0.0
-    for dom in PROBE_TARGETS:
+    for dom in targets:
         for _ in range(TRIES_PER_TARGET):
             dt = _tls_handshake(dom)
             if dt is not None:
@@ -49,47 +72,32 @@ def _score_current() -> tuple[int, float]:
 def scan(operator: str = "auto", verbose: bool = False) -> str | None:
     """Stratejileri dene, en iyisinin adını döndür (veya None)."""
     order = strategies.PROBE_ORDER.get(operator, strategies.PROBE_ORDER["auto"])
-    wan = None
-    from . import isp
-    wan = isp.detect_wan_iface()
-
-    engine.load_modules()
-    engine.prepare_runtime()
-    bridge = DnsBridge()
-    bridge.start()
-    engine.nft_apply(wan)
+    targets = _probe_targets()
+    maxok = len(targets) * TRIES_PER_TARGET
 
     results: list[tuple[str, int, float]] = []
-    proc = None
-    try:
-        for strat in order:
-            if strat not in strategies.STRATEGIES:
-                continue
-            argv = strategies.build_argv(strat)
-            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-            time.sleep(1.2)  # nfqws2 kuyruğa bağlansın
-            ok, lat = _score_current()
-            maxok = len(PROBE_TARGETS) * TRIES_PER_TARGET
-            if verbose:
-                bar = f"{ok}/{maxok}"
-                extra = f" ({lat/ok:.2f}s ort)" if ok else ""
-                print(f"  {strategies.STRATEGIES[strat]['label']:32} {bar}{extra}")
-            results.append((strat, ok, lat))
-            proc.terminate()
-            try:
-                proc.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            proc = None
-            # Tam başarı + makul gecikme ise erken çık
-            if ok == maxok and lat / max(ok, 1) < 1.0:
-                break
-    finally:
-        if proc and proc.poll() is None:
-            proc.kill()
-        engine.nft_delete()
-        bridge.stop()
+    with _platform().ProbeEnv() as env:
+        proc = None
+        try:
+            for strat in order:
+                if strat not in strategies.STRATEGIES:
+                    continue
+                proc = env.spawn(strat)
+                time.sleep(env.settle)  # motor yakalamaya bağlansın
+                ok, lat = _score_current(targets)
+                if verbose:
+                    bar = f"{ok}/{maxok}"
+                    extra = f" ({lat/ok:.2f}s ort)" if ok else ""
+                    print(f"  {strategies.STRATEGIES[strat]['label']:32} {bar}{extra}")
+                results.append((strat, ok, lat))
+                env.kill(proc)
+                proc = None
+                # Tam başarı + makul gecikme ise erken çık
+                if ok == maxok and lat / max(ok, 1) < 1.0:
+                    break
+        finally:
+            if proc is not None:
+                env.kill(proc)
 
     # en iyi: en çok başarı, eşitlikte en düşük ortalama gecikme
     working = [(s, ok, lat) for s, ok, lat in results if ok > 0]

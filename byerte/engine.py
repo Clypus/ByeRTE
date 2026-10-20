@@ -15,7 +15,6 @@ root olarak çalışır (nft + NFQUEUE için). nfqws2 kendi --user=nobody ile ye
 from __future__ import annotations
 
 import os
-import pwd
 import signal
 import subprocess
 import sys
@@ -24,6 +23,11 @@ import time
 
 from . import config, paths, strategies
 from .dns import DnsBridge
+
+try:
+    import pwd
+except ImportError:  # Windows: bu modül yalnızca Linux'ta çalışır (bkz. byerte.win.engine)
+    pwd = None  # type: ignore[assignment]
 
 
 # --- Çekirdek modülleri ------------------------------------------------------
@@ -109,9 +113,15 @@ def prepare_runtime() -> None:
         pass
     # nfqws2 yetki düşürdükten SONRA hostlist + lua dosyalarını açar; hepsini
     # herkesin okuyabileceği /run/byerte altına kopyala (kaynak /home'da olabilir).
+    # Kullanıcı listelerini (hostlist/denylist) ilk açılışta tohumla, sonra kopyala.
+    paths.seed_user_lists()
     dst = paths.active_hostlist_file()
-    dst.write_text(paths.hostlist_file().read_text())
+    dst.write_text(paths.user_hostlist_file().read_text())
     os.chmod(dst, 0o644)
+
+    deny = paths.active_denylist_file()
+    deny.write_text(paths.denylist_file().read_text())
+    os.chmod(deny, 0o644)
 
     lua_dst = paths.active_lua_dir()
     lua_dst.mkdir(exist_ok=True)
@@ -143,7 +153,8 @@ class Engine:
         self._stop = threading.Event()
 
     def _start_nfqws(self) -> None:
-        argv = strategies.build_argv(self.strategy)
+        argv = strategies.build_argv(self.strategy, with_exclude=paths.denylist_active(),
+                                     all_sites=paths.all_sites_active())
         self.proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
 

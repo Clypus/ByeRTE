@@ -4,16 +4,31 @@ Licensed under the GNU General Public License v3.0 or later (see LICENSE).
 
 This product bundles third-party components:
 
-1. zapret2 (nfqws2 engine + Lua strategy scripts)
+1. zapret2 (nfqws2 / winws2 engine + Lua strategy scripts)
    - Version: v1.0.5.2 (see data/ZAPRET2_VERSION)
    - Copyright (C) bol-van and contributors
    - License: GPL-3.0-or-later
    - Source: https://github.com/bol-van/zapret2
-   - The binaries under data/nfqws2/ are the UNMODIFIED official release
-     binaries from the upstream project's v1.0.5.2 release. Their SHA-256
-     checksums are recorded in data/SHA256SUMS and match the upstream
-     sha256sum.txt. The corresponding source code is available at the URL
-     above. The Lua scripts under data/lua/ are unmodified upstream files.
+   - The binaries under data/nfqws2/ (Linux) and data/winws2/ (Windows:
+     winws2.exe) are the UNMODIFIED official release binaries from the
+     upstream project's v1.0.5.2 release. Their SHA-256 checksums are
+     recorded in data/SHA256SUMS and match the upstream sha256sum.txt. The
+     corresponding source code is available at the URL above. The Lua
+     scripts under data/lua/ are unmodified upstream files.
+
+2. WinDivert (Windows packet interception driver + library)
+   - Files: data/winws2/windows-x86_64/WinDivert.dll, WinDivert64.sys
+   - Copyright (C) Basil00 and contributors
+   - License: LGPL-3.0 or GPL-3.0 (dual). Redistributed unmodified as shipped
+     in the zapret2 v1.0.5.2 release; SHA-256 recorded in data/SHA256SUMS.
+   - Source: https://github.com/basil00/WinDivert
+
+3. Cygwin runtime
+   - File: data/winws2/windows-x86_64/cygwin1.dll (winws2 is a Cygwin program)
+   - Copyright (C) Red Hat, Inc. and contributors
+   - License: LGPL-3.0-or-later (with the Cygwin linking terms). Redistributed
+     unmodified as shipped in the zapret2 v1.0.5.2 release.
+   - Source: https://cygwin.com
 
 Turkish ISP DPI-bypass strategy presets were adapted from:
    - Unwall            — https://github.com/WinTone01/Unwall

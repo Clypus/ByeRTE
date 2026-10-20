@@ -11,7 +11,7 @@ import socket
 import ssl
 import subprocess
 
-from . import strategies
+from . import paths, strategies
 from .dns import DohResolver, parse_txt
 
 # Genel IP için CDN-arkası uç (meşhur IP'ler engelli olabilir; cloudflare.com
@@ -22,7 +22,10 @@ _TRACE_PATH = "/cdn-cgi/trace"
 
 
 def detect_wan_iface() -> str | None:
-    """Varsayılan rota arayüzü (ör. wlan0, enp3s0)."""
+    """Varsayılan rota arayüzü (ör. wlan0, enp3s0). Windows'ta gerekmez: winws2
+    WinDivert filtresi zaten tüm arayüzleri (loopback/LAN hariç) kapsar."""
+    if paths.IS_WINDOWS:
+        return None
     try:
         out = subprocess.run(["ip", "route", "show", "default"],
                              capture_output=True, text=True, timeout=5).stdout
@@ -37,6 +40,8 @@ def detect_wan_iface() -> str | None:
 
 def detect_wan_ip() -> str | None:
     """Yerel WAN kaynak IP'si (default rota üzerinden)."""
+    if paths.IS_WINDOWS:
+        return None
     try:
         out = subprocess.run(["ip", "route", "get", "1.1.1.1"],
                              capture_output=True, text=True, timeout=5).stdout
